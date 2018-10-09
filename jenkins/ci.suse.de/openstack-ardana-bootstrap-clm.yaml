@@ -54,6 +54,7 @@
             - hosGM8+up
             - stagingcloud9
             - develcloud9
+            - cloud9M3
           description: >-
             The cloud repository (from provo-clouddata) to be used for testing.
             This value can take the following form:
@@ -62,6 +63,7 @@
                develcloud<X> (Devel:Cloud:X)
                GM<X> (official GM)
                GM<X>+up (official GM plus Cloud-Updates)
+               cloud9MX (cloud 9 milestones)
 
       - string:
           name: cloud_maint_updates
@@ -104,13 +106,6 @@
           description: >-
             The Jenkins agent where this job must run. Used by upstream jobs to
             force a job to reuse the same node.
-
-      - string:
-          name: reuse_workspace
-          default: ''
-          description: >-
-            The Jenkins workspace that this job must reuse. Used by upstream jobs to
-            force a job to use the same workspace.
 
     pipeline-scm:
       scm:

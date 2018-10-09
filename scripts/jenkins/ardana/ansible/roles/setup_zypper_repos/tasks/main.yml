@@ -15,7 +15,14 @@
 #
 ---
 
+- name: Gather variables when milestone cloudsousrce
+  include_vars: "milestone.yml"
+  when: is_milestone
+
 - include_tasks: setup_sles_cloud_repos.yml
+
+- include_tasks: setup_repo_from_iso.yml
+  when: is_milestone
 
 - include_tasks: setup_maint_update_repos.yml
   when: cloud_maint_updates_list | length or

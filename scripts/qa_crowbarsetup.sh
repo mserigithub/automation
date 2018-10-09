@@ -879,14 +879,12 @@ function onadmin_set_source_variables
             CLOUDISOURL=${want_cloud6_iso_url:="$susedownload/ibs/Devel:/Cloud:/6/images/iso"}
             [ -n "$TESTHEAD" ] && CLOUDISOURL="$susedownload/ibs/Devel:/Cloud:/6:/Staging/images/iso"
             CLOUDISONAME=${want_cloud6_iso:="SUSE-OPENSTACK-CLOUD-6-${arch}-Media1.iso"}
-            CLOUDTESTISONAME="CLOUD-6-TESTING-$arch*Media1.iso"
             CLOUDLOCALREPOS="SUSE-OpenStack-Cloud-6-devel"
         ;;
         develcloud7)
             CLOUDISOURL=${want_cloud7_iso_url:="$susedownload/ibs/Devel:/Cloud:/7/images/iso"}
             [ -n "$TESTHEAD" ] && CLOUDISOURL="$susedownload/ibs/Devel:/Cloud:/7:/Staging/images/iso"
             CLOUDISONAME=${want_cloud7_iso:="SUSE-OPENSTACK-CLOUD-7-${arch}-Media1.iso"}
-            CLOUDTESTISONAME="CLOUD-7-TESTING-${arch}-Media1.iso"
             CLOUDLOCALREPOS="SUSE-OpenStack-Cloud-7-devel"
         ;;
         develcloud8)
@@ -900,12 +898,6 @@ function onadmin_set_source_variables
             [ -n "$TESTHEAD" ] && CLOUDISOURL="$susedownload/ibs/Devel:/Cloud:/9:/Staging/images/iso"
             CLOUDISONAME="SUSE-OPENSTACK-CLOUD-CROWBAR-9-${arch}-Media1.iso"
             CLOUDLOCALREPOS="SUSE-OpenStack-Cloud-Crowbar-9-devel"
-        ;;
-        rockycloud9)
-            CLOUDISOURL="$susedownload/ibs/Devel:/Cloud:/9:/Rocky/images/iso"
-            [ -n "$TESTHEAD" ] && CLOUDISOURL="$susedownload/ibs/Devel:/Cloud:/9:/Rocky/images/iso"
-            CLOUDISONAME="SUSE-OPENSTACK-CLOUD-CROWBAR-9-${arch}-Media1.iso"
-            CLOUDLOCALREPOS="SUSE-OpenStack-Cloud-Crowbar-9-devel-rocky"
         ;;
         susecloud9)
             CLOUDISOURL="$susedownload/ibs/SUSE:/SLE-12-SP4:/Update:/Products:/Cloud9/images/iso/"
@@ -1073,6 +1065,13 @@ EOF
     if [ -e ~/$netfilepatch ]; then
         ensure_packages_installed patch
         patch -p1 $netfile < ~/$netfilepatch
+    fi
+    if [ -e ~/crowbar.patch ]; then
+        ensure_packages_installed patch
+        (
+            cd /opt/dell
+            patch -p1 < ~/crowbar.patch
+        )
     fi
 
     # to revert https://github.com/crowbar/barclamp-network/commit/a85bb03d7196468c333a58708b42d106d77eaead
@@ -2547,7 +2546,7 @@ function custom_configuration
             fi
         ;;
         murano)
-            if [[ $hacloud = 1 ]] ; then
+            if [[ $hacloud = 1 ]] && ( iscloudver 7 || iscloudver 8 ) ; then
                 proposal_set_value murano default "['deployment']['murano']['elements']['murano-server']" "['cluster:$clusternameservices']"
             fi
         ;;
@@ -3024,8 +3023,8 @@ function deploy_single_proposal
             fi
             ;;
         murano)
-            if ! iscloudver 7plus; then
-                echo "Murano is SOC 7+ only. Skipping"
+            if ! ( iscloudver 7 || iscloudver 8 ) ; then
+                echo "Murano is SOC 7 and 8 only. Skipping"
                 return
             fi
             ;;
@@ -3690,11 +3689,12 @@ function oncontroller_manila_generic_driver_setup()
         oscclient_ver=`rpm -q --queryformat '%{VERSION}' python-openstackclient`
         if [ ${oscclient_ver:0:1} -ge 3 ]; then
             # >= Newton
-            manila_tenant_vm_ip=`openstack ip floating create floating -f value -c floating_ip_address`
+            manila_tenant_vm_ip=`openstack floating ip create floating -f value -c floating_ip_address`
+            openstack server add floating ip manila-service $manila_tenant_vm_ip
         else
             manila_tenant_vm_ip=`openstack ip floating create floating -f value -c ip`
+            openstack ip floating add $manila_tenant_vm_ip manila-service
         fi
-        openstack ip floating add $manila_tenant_vm_ip manila-service
 
         [ $? != 0 ] && complain 44 "adding a floating ip to the manila service VM failed"
     fi
@@ -4107,8 +4107,8 @@ function oncontroller_testsetup
     fi
 
     # check that no port is in binding_failed state
-    for p in $(neutron port-list -f csv -c id --quote none | grep -v id); do
-        if neutron port-show $p -f value | grep -qx binding_failed; then
+    for p in $(openstack port list -f csv -c ID --quote none | grep -v ID); do
+        if openstack port show $p -f value | grep -qx binding_failed; then
             echo "binding for port $p failed.."
             portresult=1
         fi
@@ -4517,6 +4517,10 @@ function onadmin_ping_running_instances
 
 function onadmin_testpostupgrade
 {
+    if ! grep non_disruptive /var/lib/crowbar/upgrade/*-progress.yml ; then
+        complain 11 "The testpostupgrade step is only valid for non-disruptive upgrade mode!"
+    fi
+
     get_novacontroller
     check_novacontroller
 

@@ -19,6 +19,14 @@
   slurp:
     src: "{{ local_repos_base_dir }}/{{ base_repos.0 | regex_replace('devel.*', 'Pool') }}/media.1/build"
   register: cloud_media_build_version
+  when: not is_milestone
+
+- name: Get media build version for milestone
+  uri:
+    url: "{{ media[cloud_release].url }}"
+    return_content: yes
+  register: media_url
+  when: is_milestone
 
 - name: Drop motd
   template:

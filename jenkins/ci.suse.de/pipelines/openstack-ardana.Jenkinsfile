@@ -3,45 +3,67 @@
  */
 
 pipeline {
-  // skip the default checkout, because we want to use a custom path
   options {
+    // skip the default checkout, because we want to use a custom path
     skipDefaultCheckout()
+    timestamps()
+    // reserve a resource if instructed to do so, otherwise use a dummy resource
+    // and a zero quantity to fool Jenkins into thinking it reserved a resource when in fact it didn't
+    lock(label: reserve_env == 'true' ? ardana_env:'dummy-resource',
+         variable: 'reserved_env',
+         quantity: reserve_env == 'true' ? 1:0 )
   }
 
   agent {
     node {
       label 'cloud-ardana-ci'
-      customWorkspace ardana_env ? "${JOB_NAME}-${ardana_env}" : "${JOB_NAME}-${BUILD_NUMBER}"
+      customWorkspace "${JOB_NAME}-${BUILD_NUMBER}"
     }
   }
 
   stages {
     stage('Setup workspace') {
       steps {
-        cleanWs()
         script {
+          // Set this variable to be used by upstream builds
+          env.blue_ocean_buildurl = env.RUN_DISPLAY_URL
           env.cloud_type = "virtual"
           if (ardana_env == '') {
             error("Empty 'ardana_env' parameter value.")
           }
-          currentBuild.displayName = "#${BUILD_NUMBER} ${ardana_env}"
+          if (env.reserved_env && reserved_env != null) {
+            env.ardana_env = reserved_env
+          }
+          currentBuild.displayName = "#${BUILD_NUMBER}: ${ardana_env}"
           if ( ardana_env.startsWith("qe") || ardana_env.startsWith("qa") ) {
               env.cloud_type = "physical"
           }
+          // Use a shared workspace folder for all jobs running on the same
+          // target 'ardana_env' cloud environment
+          env.SHARED_WORKSPACE = sh (
+            returnStdout: true,
+            script: 'echo "$(dirname $WORKSPACE)/shared/${ardana_env}"'
+          ).trim()
         }
-        sh('git clone $git_automation_repo --branch $git_automation_branch automation-git')
         sh('''
+          rm -rf "$SHARED_WORKSPACE"
+          mkdir -p "$SHARED_WORKSPACE"
+
+          # archiveArtifacts and junit don't support absolute paths, so we have to to this instead
+          ln -s ${SHARED_WORKSPACE}/.artifacts ${WORKSPACE}
+
+          cd $SHARED_WORKSPACE
+          git clone $git_automation_repo --branch $git_automation_branch automation-git
+          cd automation-git
+
           if [ -n "$github_pr" ] ; then
-            cd automation-git
-            exec scripts/jenkins/ardana/pr-update.sh
+            scripts/jenkins/ardana/pr-update.sh
           fi
-        ''')
-        sh('''
-          source automation-git/scripts/jenkins/ardana/jenkins-helper.sh
-          ansible_playbook load-job-params.yml
-        ''')
-        sh('''
-          source automation-git/scripts/jenkins/ardana/jenkins-helper.sh
+
+          source scripts/jenkins/ardana/jenkins-helper.sh
+          ansible_playbook load-job-params.yml \
+            -e jjb_file=$SHARED_WORKSPACE/automation-git/jenkins/ci.suse.de/templates/cloud-ardana-pipeline-template.yaml \
+            -e jjb_type=job-template
           ansible_playbook notify-rc-pcloud.yml -e @input.yml
         ''')
       }
@@ -57,19 +79,23 @@ pipeline {
           }
           steps {
             script {
-              def slaveJob = build job: 'openstack-ardana-pcloud', parameters: [
-                string(name: 'ardana_env', value: "$ardana_env"),
-                string(name: 'scenario_name', value: "$scenario_name"),
-                string(name: 'clm_model', value: "$clm_model"),
-                string(name: 'controllers', value: "$controllers"),
-                string(name: 'sles_computes', value: "$sles_computes"),
-                string(name: 'rhel_computes', value: "$rhel_computes"),
-                string(name: 'rc_notify', value: "$rc_notify"),
-                string(name: 'git_automation_repo', value: "$git_automation_repo"),
-                string(name: 'git_automation_branch', value: "$git_automation_branch"),
-                string(name: 'reuse_node', value: "${NODE_NAME}"),
-                string(name: 'reuse_workspace', value: "${WORKSPACE}")
-              ], propagate: true, wait: true
+              def slaveJob = null
+              try {
+                slaveJob = build job: 'openstack-ardana-pcloud', parameters: [
+                  string(name: 'ardana_env', value: "$ardana_env"),
+                  string(name: 'scenario_name', value: "$scenario_name"),
+                  string(name: 'clm_model', value: "$clm_model"),
+                  string(name: 'controllers', value: "$controllers"),
+                  string(name: 'sles_computes', value: "$sles_computes"),
+                  string(name: 'rhel_computes', value: "$rhel_computes"),
+                  string(name: 'rc_notify', value: "$rc_notify"),
+                  string(name: 'git_automation_repo', value: "$git_automation_repo"),
+                  string(name: 'git_automation_branch', value: "$git_automation_branch"),
+                  string(name: 'reuse_node', value: "${NODE_NAME}")
+                ], propagate: true, wait: true
+              } finally {
+                echo slaveJob.buildVariables.blue_ocean_buildurl
+              }
             }
           }
         }
@@ -80,22 +106,26 @@ pipeline {
           }
           steps {
             script {
-              def slaveJob = build job: 'openstack-ardana-vcloud', parameters: [
-                string(name: 'ardana_env', value: "$ardana_env"),
-                string(name: 'git_input_model_branch', value: "$git_input_model_branch"),
-                string(name: 'git_input_model_path', value: "$git_input_model_path"),
-                string(name: 'model', value: "$model"),
-                string(name: 'scenario_name', value: "$scenario_name"),
-                string(name: 'clm_model', value: "$clm_model"),
-                string(name: 'controllers', value: "$controllers"),
-                string(name: 'sles_computes', value: "$sles_computes"),
-                string(name: 'rhel_computes', value: "$rhel_computes"),
-                string(name: 'rc_notify', value: "$rc_notify"),
-                string(name: 'git_automation_repo', value: "$git_automation_repo"),
-                string(name: 'git_automation_branch', value: "$git_automation_branch"),
-                string(name: 'reuse_node', value: "${NODE_NAME}"),
-                string(name: 'reuse_workspace', value: "${WORKSPACE}")
-              ], propagate: true, wait: true
+              def slaveJob = null
+              try {
+                slaveJob = build job: 'openstack-ardana-vcloud', parameters: [
+                  string(name: 'ardana_env', value: "$ardana_env"),
+                  string(name: 'git_input_model_branch', value: "$git_input_model_branch"),
+                  string(name: 'git_input_model_path', value: "$git_input_model_path"),
+                  string(name: 'model', value: "$model"),
+                  string(name: 'scenario_name', value: "$scenario_name"),
+                  string(name: 'clm_model', value: "$clm_model"),
+                  string(name: 'controllers', value: "$controllers"),
+                  string(name: 'sles_computes', value: "$sles_computes"),
+                  string(name: 'rhel_computes', value: "$rhel_computes"),
+                  string(name: 'rc_notify', value: "$rc_notify"),
+                  string(name: 'git_automation_repo', value: "$git_automation_repo"),
+                  string(name: 'git_automation_branch', value: "$git_automation_branch"),
+                  string(name: 'reuse_node', value: "${NODE_NAME}")
+                ], propagate: true, wait: true
+              } finally {
+                echo slaveJob.buildVariables.blue_ocean_buildurl
+              }
             }
           }
         }
@@ -106,17 +136,22 @@ pipeline {
           }
           steps {
             script {
-              def slaveJob = build job: 'openstack-ardana-testbuild-gerrit', parameters: [
-                string(name: 'gerrit_change_ids', value: "$gerrit_change_ids"),
-                string(name: 'develproject', value: "$develproject"),
-                string(name: 'homeproject', value: "$homeproject"),
-                string(name: 'repository', value: "$repository"),
-                string(name: 'git_automation_repo', value: "$git_automation_repo"),
-                string(name: 'git_automation_branch', value: "$git_automation_branch")
-              ], propagate: true, wait: true
+              def slaveJob = null
+              try {
+                slaveJob = build job: 'openstack-ardana-testbuild-gerrit', parameters: [
+                  string(name: 'gerrit_change_ids', value: "$gerrit_change_ids"),
+                  string(name: 'develproject', value: "$develproject"),
+                  string(name: 'homeproject', value: "$homeproject"),
+                  string(name: 'repository', value: "$repository"),
+                  string(name: 'git_automation_repo', value: "$git_automation_repo"),
+                  string(name: 'git_automation_branch', value: "$git_automation_branch")
+                ], propagate: true, wait: true
 
-              // Load the environment variables set by the downstream job
-              env.test_repository_url = slaveJob.buildVariables.test_repository_url
+                // Load the environment variables set by the downstream job
+                env.test_repository_url = slaveJob.buildVariables.test_repository_url
+              } finally {
+                echo slaveJob.buildVariables.blue_ocean_buildurl
+              }
             }
           }
         }
@@ -126,18 +161,22 @@ pipeline {
     stage('Bootstrap CLM') {
       steps {
         script {
-          def slaveJob = build job: 'openstack-ardana-bootstrap-clm', parameters: [
-            string(name: 'ardana_env', value: "$ardana_env"),
-            string(name: 'cloudsource', value: "$cloudsource"),
-            string(name: 'cloud_maint_updates', value: "$cloud_maint_updates"),
-            string(name: 'sles_maint_updates', value: "$sles_maint_updates"),
-            string(name: 'extra_repos', value: "${env.test_repository_url ?: extra_repos}"),
-            string(name: 'rc_notify', value: "$rc_notify"),
-            string(name: 'git_automation_repo', value: "$git_automation_repo"),
-            string(name: 'git_automation_branch', value: "$git_automation_branch"),
-            string(name: 'reuse_node', value: "${NODE_NAME}"),
-            string(name: 'reuse_workspace', value: "${WORKSPACE}")
-          ], propagate: true, wait: true
+          def slaveJob = null
+          try {
+            slaveJob = build job: 'openstack-ardana-bootstrap-clm', parameters: [
+              string(name: 'ardana_env', value: "$ardana_env"),
+              string(name: 'cloudsource', value: "$cloudsource"),
+              string(name: 'cloud_maint_updates', value: "$cloud_maint_updates"),
+              string(name: 'sles_maint_updates', value: "$sles_maint_updates"),
+              string(name: 'extra_repos', value: "${env.test_repository_url ?: extra_repos}"),
+              string(name: 'rc_notify', value: "$rc_notify"),
+              string(name: 'git_automation_repo', value: "$git_automation_repo"),
+              string(name: 'git_automation_branch', value: "$git_automation_branch"),
+              string(name: 'reuse_node', value: "${NODE_NAME}")
+            ], propagate: true, wait: true
+          } finally {
+            echo slaveJob.buildVariables.blue_ocean_buildurl
+          }
         }
       }
     }
@@ -151,6 +190,7 @@ pipeline {
           }
           steps{
             sh('''
+              cd $SHARED_WORKSPACE
               source automation-git/scripts/jenkins/ardana/jenkins-helper.sh
               ansible_playbook bootstrap-pcloud-nodes.yml -e @input.yml
             ''')
@@ -163,6 +203,7 @@ pipeline {
           }
           steps{
             sh('''
+              cd $SHARED_WORKSPACE
               source automation-git/scripts/jenkins/ardana/jenkins-helper.sh
               ansible_playbook bootstrap-vcloud-nodes.yml -e @input.yml
             ''')
@@ -174,6 +215,7 @@ pipeline {
     stage('Deploy cloud') {
       steps {
         sh('''
+          cd $SHARED_WORKSPACE
           source automation-git/scripts/jenkins/ardana/jenkins-helper.sh
           ansible_playbook deploy-cloud.yml -e @input.yml
         ''')
@@ -189,27 +231,55 @@ pipeline {
           }
           steps {
             script {
-              def slaveJob = build job: 'openstack-ardana-tempest', parameters: [
-                string(name: 'ardana_env', value: "$ardana_env"),
-                string(name: 'tempest_run_filter', value: "$tempest_run_filter"),
-                string(name: 'rc_notify', value: "$rc_notify"),
-                string(name: 'git_automation_repo', value: "$git_automation_repo"),
-                string(name: 'git_automation_branch', value: "$git_automation_branch"),
-                string(name: 'reuse_node', value: "${NODE_NAME}"),
-                string(name: 'reuse_workspace', value: "${WORKSPACE}")
-              ], propagate: true, wait: true
+              def slaveJob = null
+              try {
+                slaveJob = build job: 'openstack-ardana-tempest', parameters: [
+                  string(name: 'ardana_env', value: "$ardana_env"),
+                  string(name: 'tempest_run_filter', value: "$tempest_run_filter"),
+                  string(name: 'rc_notify', value: "$rc_notify"),
+                  string(name: 'git_automation_repo', value: "$git_automation_repo"),
+                  string(name: 'git_automation_branch', value: "$git_automation_branch"),
+                  string(name: 'reuse_node', value: "${NODE_NAME}")
+                ], propagate: true, wait: true
+              } finally {
+                echo slaveJob.buildVariables.blue_ocean_buildurl
+              }
             }
           }
         }
       }
     }
 
-    stage ('Deploy CaaSP') {
+    stage('Run QA tests') {
+      when {
+        expression { qa_test_list != '' }
+      }
+      steps {
+        script {
+          def slaveJob = null
+          try {
+            slaveJob = build job: 'openstack-ardana-qa-tests', parameters: [
+              string(name: 'ardana_env', value: "$ardana_env"),
+              string(name: 'test_list', value: "$qa_test_list"),
+              string(name: 'rc_notify', value: "$rc_notify"),
+              string(name: 'git_automation_repo', value: "$git_automation_repo"),
+              string(name: 'git_automation_branch', value: "$git_automation_branch"),
+              string(name: 'reuse_node', value: "${NODE_NAME}")
+            ], propagate: true, wait: true
+          } finally {
+            echo slaveJob.buildVariables.blue_ocean_buildurl
+          }
+        }
+      }
+    }
+
+    stage('Deploy CaaSP') {
       when {
         expression { want_caasp == 'true' }
       }
       steps {
         sh('''
+          cd $SHARED_WORKSPACE
           source automation-git/scripts/jenkins/ardana/jenkins-helper.sh
           ansible_playbook deploy-caasp.yml -e @input.yml
         ''')
@@ -219,12 +289,20 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: '.artifacts/**/*', allowEmptyArchive: true
+      script{
+        archiveArtifacts artifacts: ".artifacts/**/*", allowEmptyArchive: true
+        if ( tempest_run_filter != '' ) {
+          junit testResults: ".artifacts/*.xml", allowEmptyResults: true
+        }
+      }
+      cleanWs()
       script{
         if (cleanup == "always" && cloud_type == "virtual") {
           def slaveJob = build job: 'openstack-ardana-heat', parameters: [
             string(name: 'ardana_env', value: "$ardana_env"),
-            string(name: 'heat_action', value: "delete")
+            string(name: 'heat_action', value: "delete"),
+            string(name: 'git_automation_repo', value: "$git_automation_repo"),
+            string(name: 'git_automation_branch', value: "$git_automation_branch")
           ], propagate: false, wait: false
         }
       }
@@ -234,13 +312,16 @@ pipeline {
         if (cleanup == "on success" && cloud_type == "virtual") {
           def slaveJob = build job: 'openstack-ardana-heat', parameters: [
             string(name: 'ardana_env', value: "$ardana_env"),
-            string(name: 'heat_action', value: "delete")
+            string(name: 'heat_action', value: "delete"),
+            string(name: 'git_automation_repo', value: "$git_automation_repo"),
+            string(name: 'git_automation_branch', value: "$git_automation_branch")
           ], propagate: false, wait: false
         }
       }
       sh '''
         if [ -n "$github_pr" ] ; then
-          automation-git/scripts/ardana/pr-success.sh
+          cd $SHARED_WORKSPACE
+          exec automation-git/scripts/ardana/pr-success.sh
         fi
       '''
     }
@@ -249,13 +330,16 @@ pipeline {
         if (cleanup == "on failure" && cloud_type == "virtual") {
           def slaveJob = build job: 'openstack-ardana-heat', parameters: [
             string(name: 'ardana_env', value: "$ardana_env"),
-            string(name: 'heat_action', value: "delete")
+            string(name: 'heat_action', value: "delete"),
+            string(name: 'git_automation_repo', value: "$git_automation_repo"),
+            string(name: 'git_automation_branch', value: "$git_automation_branch")
           ], propagate: false, wait: false
         }
       }
       sh '''
         if [ -n "$github_pr" ] ; then
-          automation-git/scripts/ardana/pr-failure.sh
+          cd $SHARED_WORKSPACE
+          exec automation-git/scripts/ardana/pr-failure.sh
         fi
       '''
     }

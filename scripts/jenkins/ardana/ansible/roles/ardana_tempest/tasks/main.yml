@@ -18,6 +18,9 @@
 - include_tasks: pre_defcore.yml
   when: tempest_run_filter == 'defcore'
 
+- include_tasks: import_octavia_image.yml
+  when: tempest_run_filter == 'lbaas'
+
 - include_tasks: run_tempest.yml
 
 - include_tasks: post_defcore.yml
